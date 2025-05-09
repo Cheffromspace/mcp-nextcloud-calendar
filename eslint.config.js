@@ -20,6 +20,11 @@ export default [
         describe: 'readonly',
         it: 'readonly',
         expect: 'readonly',
+        jest: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
       },
     },
     plugins: {
@@ -27,7 +32,15 @@ export default [
     },
     rules: {
       ...ts.configs.recommended.rules,
+      '@typescript-eslint/no-unused-vars': ['error', { 'argsIgnorePattern': '^_' }],
     },
   },
   prettierConfig,
+  {
+    files: ['**/__tests__/**/*.ts'],
+    rules: {
+      'no-import-assign': 'off', // Allow modifying imports for mocking
+      '@typescript-eslint/no-explicit-any': 'off', // Allow any in tests for mocking
+    }
+  },
 ];

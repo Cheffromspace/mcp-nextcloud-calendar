@@ -19,7 +19,7 @@ export function escapeXml(input: string | null | undefined): string {
     return '';
   }
 
-  return input
+  return String(input)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
