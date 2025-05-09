@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Cloudflare Workers Migration
+
+This project is in the process of being migrated from Express.js to Cloudflare Workers.
+See the comprehensive migration guide at [docs/CLOUDFLARE-WORKERS-MIGRATION.md](./docs/CLOUDFLARE-WORKERS-MIGRATION.md) for details.
+
 ## Development Commands
 
 ### Build and Run
