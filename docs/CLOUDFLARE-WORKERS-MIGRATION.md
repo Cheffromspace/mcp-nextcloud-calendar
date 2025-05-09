@@ -352,7 +352,7 @@ export class WebXmlService {
     try {
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(xmlString, "application/xml");
-      
+
       // Check for parsing errors
       const parserError = xmlDoc.querySelector("parsererror");
       if (parserError) {
@@ -364,7 +364,7 @@ export class WebXmlService {
           false
         );
       }
-      
+
       // Convert DOM to object structure
       return this.domToObject(xmlDoc);
     } catch (error) {
@@ -377,20 +377,26 @@ export class WebXmlService {
       );
     }
   }
-  
+
   // Convert DOM to object structure (similar to xml2js output)
   private domToObject(node: Node): Record<string, unknown> {
+    // Handle non-element nodes
     if (node.nodeType === Node.TEXT_NODE) {
       return node.nodeValue ? { "#text": node.nodeValue } : {};
     }
-    
+
+    if (node.nodeType === Node.CDATA_SECTION_NODE) {
+      return { "#cdata": node.nodeValue };
+    }
+
     if (node.nodeType !== Node.ELEMENT_NODE) {
       return {};
     }
-    
+
     const element = node as Element;
     const result: Record<string, unknown> = {};
-    
+    let textContent = "";
+
     // Handle attributes
     if (element.attributes.length > 0) {
       result["$"] = {};
@@ -399,25 +405,41 @@ export class WebXmlService {
         (result["$"] as Record<string, string>)[attr.name] = attr.value;
       }
     }
-    
+
     // Handle child nodes
     const childNodes = Array.from(element.childNodes);
     if (childNodes.length === 0) {
       return result;
     }
-    
-    // If only text nodes, return text content
-    if (childNodes.every(node => node.nodeType === Node.TEXT_NODE)) {
-      return { ...result, "#text": element.textContent };
+
+    // Check for mixed content (text nodes and elements mixed together)
+    let hasTextContent = false;
+    let hasElementContent = false;
+
+    for (const child of childNodes) {
+      if (child.nodeType === Node.TEXT_NODE || child.nodeType === Node.CDATA_SECTION_NODE) {
+        if (child.nodeValue && child.nodeValue.trim()) {
+          hasTextContent = true;
+          textContent += child.nodeValue;
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        hasElementContent = true;
+      }
     }
-    
-    // Process child elements
+
+    // If only text content, return it directly
+    if (hasTextContent && !hasElementContent) {
+      result["#text"] = textContent;
+      return result;
+    }
+
+    // Process all child nodes for mixed content
     for (const child of childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE) {
         const childElement = child as Element;
         const childName = childElement.nodeName;
         const childResult = this.domToObject(child);
-        
+
         if (result[childName]) {
           // Convert to array if multiple elements with same name
           if (!Array.isArray(result[childName])) {
@@ -427,12 +449,24 @@ export class WebXmlService {
         } else {
           result[childName] = childResult;
         }
+      } else if (child.nodeType === Node.CDATA_SECTION_NODE) {
+        // Handle CDATA sections
+        if (!result["#cdata"]) {
+          result["#cdata"] = [];
+        }
+        (result["#cdata"] as Array<string>).push(child.nodeValue || "");
+      } else if (child.nodeType === Node.TEXT_NODE && child.nodeValue && child.nodeValue.trim()) {
+        // Handle significant text in mixed content
+        if (!result["#text"]) {
+          result["#text"] = [];
+        }
+        (result["#text"] as Array<string>).push(child.nodeValue.trim());
       }
     }
-    
+
     return result;
   }
-  
+
   // Serializing DOM to string
   serializeToString(document: Document): string {
     const serializer = new XMLSerializer();
@@ -464,9 +498,9 @@ export class CalendarService {
   }
   
   async getCalendars(): Promise<Calendar[]> {
-    const url = `${this.baseUrl}/remote.php/dav/calendars/${this.username}/`;
+    const url = `${this.baseUrl}/remote.php/dav/calendars/${this.config.username}/`;
     const xmlRequest = this.buildPropfindRequest();
-    
+
     try {
       const response = await fetch(url, {
         method: 'PROPFIND',
@@ -477,14 +511,14 @@ export class CalendarService {
         },
         body: xmlRequest
       });
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch calendars: ${response.status}`);
       }
-      
+
       const xmlData = await response.text();
       const parsedData = await this.xmlService.parseXml(xmlData);
-      
+
       // Rest of processing remains the same
       // ...
     } catch (error) {
@@ -612,10 +646,60 @@ export default class CalendarWorker implements ExportedHandler<Env> {
       username: env.NEXTCLOUD_USERNAME,
       appToken: env.NEXTCLOUD_APP_TOKEN,
     };
-    
+
     // Use configuration...
   }
 }
+```
+
+### Environment-Specific Secret Management
+
+Different environments (development, staging, production) require different secret management approaches:
+
+#### Development Environment
+
+For local development, use `.dev.vars` files to manage secrets:
+
+```bash
+# Create a .dev.vars file (excluded from Git)
+echo "NEXTCLOUD_BASE_URL=https://dev-nextcloud.example.com" > .dev.vars
+echo "NEXTCLOUD_USERNAME=dev-user" >> .dev.vars
+echo "NEXTCLOUD_APP_TOKEN=dev-token" >> .dev.vars
+```
+
+Then reference these in your `wrangler.toml`:
+
+```toml
+[env.dev]
+name = "mcp-nextcloud-calendar-dev"
+# No secrets defined here as they come from .dev.vars
+```
+
+This approach keeps secrets out of your Git repository while making them available during local development.
+
+#### Production Environment
+
+For production, always use Cloudflare Secret Manager and never store credentials in code or configuration files:
+
+```bash
+# Set production secrets
+wrangler secret put NEXTCLOUD_BASE_URL --env prod
+wrangler secret put NEXTCLOUD_USERNAME --env prod
+wrangler secret put NEXTCLOUD_APP_TOKEN --env prod
+```
+
+And reference the environment in your deployment:
+
+```bash
+wrangler deploy --env prod
+```
+
+### Security Best Practices
+
+1. **Token Rotation**: Implement token rotation policies for Nextcloud app tokens
+2. **Least Privilege**: Ensure Nextcloud users have minimal required permissions
+3. **Secret Isolation**: Use different credentials for different environments
+4. **Audit Logging**: Enable audit logging for secret access in Cloudflare
 ```
 
 ## Multi-tenant Support
@@ -635,6 +719,132 @@ async handleRequest(request: Request, env: Env): Promise<Response> {
   return await calendarCache.fetch(request);
 }
 ```
+
+## Monitoring and Logging
+
+Implementing proper monitoring and logging is essential for operational visibility in Cloudflare Workers:
+
+### Structured Logging
+
+```typescript
+// Structured logging utility
+export class WorkerLogger {
+  private env: Env;
+  private component: string;
+
+  constructor(env: Env, component: string) {
+    this.env = env;
+    this.component = component;
+  }
+
+  info(message: string, data?: Record<string, unknown>): void {
+    this.log('info', message, data);
+  }
+
+  warn(message: string, data?: Record<string, unknown>): void {
+    this.log('warn', message, data);
+  }
+
+  error(message: string, error?: unknown, data?: Record<string, unknown>): void {
+    const errorData = error instanceof Error
+      ? { error: error.message, stack: error.stack, ...data }
+      : { error, ...data };
+
+    this.log('error', message, errorData);
+  }
+
+  debug(message: string, data?: Record<string, unknown>): void {
+    // Only log in debug mode
+    if (this.env.DEBUG_MODE === 'true') {
+      this.log('debug', message, data);
+    }
+  }
+
+  private log(level: string, message: string, data?: Record<string, unknown>): void {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      timestamp,
+      level,
+      component: this.component,
+      message,
+      ...data,
+      // Add request context if available
+      requestId: this.env.requestId
+    };
+
+    // In production, send to external logging service
+    if (this.env.ENVIRONMENT === 'production' && this.env.LOG_DRAIN_URL) {
+      fetch(this.env.LOG_DRAIN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(logEntry)
+      }).catch(error => {
+        // Fallback to console if external logging fails
+        console.error('Failed to send log to external service', error);
+        console.log(JSON.stringify(logEntry));
+      });
+    } else {
+      // Local development logging
+      console.log(JSON.stringify(logEntry));
+    }
+  }
+}
+```
+
+### Worker Analytics
+
+1. Configure Cloudflare Worker Analytics in your `wrangler.toml`:
+
+```toml
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+```
+
+2. Setup custom metrics for meaningful insights:
+
+```typescript
+// Custom metrics for calendar operations
+export class CalendarMetrics {
+  private env: Env;
+
+  constructor(env: Env) {
+    this.env = env;
+  }
+
+  recordCalendarFetch(tenantId: string, calendarCount: number, durationMs: number): void {
+    // Log metric data that Workers Analytics will capture
+    console.log(JSON.stringify({
+      metric: "calendar_fetch",
+      tenant_id: tenantId,
+      calendar_count: calendarCount,
+      duration_ms: durationMs,
+      timestamp: Date.now()
+    }));
+  }
+
+  recordEventFetch(tenantId: string, calendarId: string, eventCount: number, durationMs: number): void {
+    console.log(JSON.stringify({
+      metric: "event_fetch",
+      tenant_id: tenantId,
+      calendar_id: calendarId,
+      event_count: eventCount,
+      duration_ms: durationMs,
+      timestamp: Date.now()
+    }));
+  }
+}
+```
+
+### Building a Dashboard
+
+Create a Cloudflare dashboard to monitor your Workers:
+
+1. Worker health metrics
+2. API call volumes by tenant
+3. Error rates and types
+4. Performance metrics including response times
+5. Custom alerts for error thresholds and performance degradation
 
 ## Testing Strategy
 
@@ -661,7 +871,7 @@ async handleRequest(request: Request, env: Env): Promise<Response> {
    ```typescript
    import { expect, test, describe } from 'vitest';
    import { XmlService } from '../src/services/xml/xml-service';
-   
+
    describe('XmlService', () => {
      test('should parse XML correctly', async () => {
        const xmlService = new XmlService();
@@ -677,12 +887,154 @@ async handleRequest(request: Request, env: Env): Promise<Response> {
              </d:propstat>
            </d:response>
          </d:multistatus>`;
-       
+
        const result = await xmlService.parseXml(xmlString);
        expect(result).toHaveProperty('d:multistatus');
      });
+
+     test('should properly handle CDATA sections', async () => {
+       const xmlService = new XmlService();
+       const xmlString = `<?xml version="1.0" encoding="UTF-8"?>
+         <calendar>
+           <description><![CDATA[This is a <strong>formatted</strong> description]]></description>
+         </calendar>`;
+
+       const result = await xmlService.parseXml(xmlString);
+       expect(result).toHaveProperty('calendar');
+       expect(result.calendar).toHaveProperty('description');
+       expect(result.calendar.description).toHaveProperty('#cdata');
+     });
+
+     test('should handle mixed content correctly', async () => {
+       const xmlService = new XmlService();
+       const xmlString = `<?xml version="1.0" encoding="UTF-8"?>
+         <item>Text before <em>emphasized</em> and text after</item>`;
+
+       const result = await xmlService.parseXml(xmlString);
+       expect(result.item).toHaveProperty('#text');
+       expect(result.item).toHaveProperty('em');
+     });
    });
    ```
+
+5. **Security Testing**: Include specific tests for security concerns
+
+   ```typescript
+   describe('XML Security', () => {
+     test('should prevent XXE attacks', async () => {
+       const xmlService = new XmlService();
+       const maliciousXml = `<?xml version="1.0" encoding="UTF-8"?>
+         <!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+         <calendar>
+           <name>&xxe;</name>
+         </calendar>`;
+
+       // Should throw an error or sanitize the content
+       await expect(xmlService.parseXml(maliciousXml)).rejects.toThrow();
+     });
+   });
+   ```
+
+## Backward Compatibility
+
+During migration, you may need to run both Express.js and Cloudflare Workers implementations simultaneously to ensure a smooth transition.
+
+### Dual Deployment Strategy
+
+1. **Phase 1: Development and Testing**
+   - Deploy Cloudflare Worker to test environment
+   - Keep Express server running as primary service
+   - Test Worker functionality in isolation
+
+2. **Phase 2: Parallel Production**
+   - Deploy Worker to production but with restricted access
+   - Set up traffic splitting for controlled testing:
+
+```typescript
+// In your Express application
+app.use('/api/calendars', async (req, res, next) => {
+  // Check if the request should be routed to Cloudflare
+  const useCloudflare = shouldUseCloudflare(req);
+
+  if (useCloudflare) {
+    try {
+      // Forward to Cloudflare Worker
+      const workerResp = await fetch(`${WORKER_URL}/api/calendars${req.url}`, {
+        method: req.method,
+        headers: {...req.headers, 'X-Forwarded-From': 'express'},
+        body: req.method !== 'GET' ? JSON.stringify(req.body) : undefined
+      });
+
+      // Send Cloudflare response back to client
+      res.status(workerResp.status);
+      const respBody = await workerResp.text();
+      res.send(respBody);
+
+      // Log metrics for comparison
+      console.log('Request handled by Cloudflare Worker', {
+        path: req.url,
+        status: workerResp.status,
+        responseTime: Date.now() - req.startTime
+      });
+    } catch (error) {
+      // Fallback to Express on error
+      console.error('Cloudflare Worker error, falling back to Express', error);
+      next();
+    }
+  } else {
+    // Use Express handler directly
+    next();
+  }
+});
+```
+
+3. **Phase 3: Complete Migration**
+   - Redirect all traffic to Cloudflare Worker
+   - Keep Express server running as fallback for a set period
+   - Monitor for any issues before final shutdown
+
+### Compatibility API Layer
+
+Create a compatibility layer in your Cloudflare Worker to handle any API differences:
+
+```typescript
+async function handleLegacyRequest(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+
+  // Check for legacy API patterns
+  if (url.pathname.startsWith('/api/v1/')) {
+    // Map legacy endpoints to new structure
+    if (url.pathname === '/api/v1/get-calendars') {
+      // Rewrite to new endpoint format
+      url.pathname = '/api/calendars';
+
+      // Create modified request
+      const newRequest = new Request(url.toString(), {
+        method: request.method,
+        headers: request.headers,
+        body: request.body
+      });
+
+      // Process with new handler
+      const response = await handleCalendarRequest(newRequest);
+
+      // Transform response to match legacy format if needed
+      const responseData = await response.json();
+      const legacyResponse = transformToLegacyFormat(responseData);
+
+      return new Response(JSON.stringify(legacyResponse), {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Compatibility-Mode': 'legacy'
+        }
+      });
+    }
+  }
+
+  // Pass through for modern API requests
+  return null;
+}
+```
 
 ## Deployment Pipeline
 
@@ -710,8 +1062,35 @@ jobs:
           node-version: '18'
       - run: npm ci
       - run: npm test
+      - name: Security scanning
+        run: npm run security-scan
+      - name: Code coverage
+        run: npm run test:coverage
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
-  deploy:
+  deploy-staging:
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: npm ci
+      - name: Deploy to staging
+        run: npm run deploy:staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          TEST_ENDPOINT: ${{ steps.deploy.outputs.url }}
+
+  deploy-production:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -721,9 +1100,14 @@ jobs:
         with:
           node-version: '18'
       - run: npm ci
-      - run: npm run deploy
+      - name: Deploy to production
+        run: npm run deploy:production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Run smoke tests
+        run: npm run test:smoke
+        env:
+          PROD_ENDPOINT: ${{ steps.deploy.outputs.url }}
 ```
 
 2. Add deployment scripts to package.json:
@@ -733,10 +1117,93 @@ jobs:
   "scripts": {
     "dev": "wrangler dev",
     "test": "vitest run",
-    "deploy": "wrangler deploy"
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run integration",
+    "test:smoke": "vitest run smoke",
+    "security-scan": "snyk test",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production"
   }
 }
 ```
+
+## Security Considerations
+
+### Authentication Flow Security
+
+When migrating authentication from Express.js to Cloudflare Workers, consider these key differences:
+
+1. **Token Handling**:
+   - Express.js often uses session cookies or JWT tokens stored in memory
+   - Workers should use encrypted tokens with appropriate security headers
+   - Implement PASETO tokens instead of JWT when possible for better security
+
+2. **CSRF Protection**:
+   - Express.js typically uses middleware like `csurf`
+   - Workers need custom CSRF protection implementation
+   - Example implementation:
+
+```typescript
+function generateCsrfToken(sessionId: string): string {
+  // Create HMAC-based token with timestamp
+  const timestamp = Date.now();
+  const message = `${sessionId}:${timestamp}`;
+
+  // In a real implementation, use a proper HMAC function
+  // This is a simplified example
+  const signature = hashString(message + CSRF_SECRET);
+  return `${timestamp}:${signature}`;
+}
+
+function validateCsrfToken(token: string, sessionId: string): boolean {
+  const [timestamp, signature] = token.split(':');
+
+  // Check token age (10 minute expiry)
+  const now = Date.now();
+  if (now - parseInt(timestamp) > 10 * 60 * 1000) {
+    return false;
+  }
+
+  // Verify signature
+  const message = `${sessionId}:${timestamp}`;
+  const expectedSignature = hashString(message + CSRF_SECRET);
+  return signature === expectedSignature;
+}
+```
+
+3. **Secure Headers**:
+   - Automatically implement security headers in all responses:
+
+```typescript
+function addSecurityHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+
+  // Add security headers
+  headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Content-Security-Policy', "default-src 'self'");
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+```
+
+4. **OAuth Integration**:
+   - Leverage Cloudflare Access for authentication
+   - Use JWT validation with appropriate audience checks
+
+### XML Security
+
+XML processing presents specific security concerns:
+
+1. **XXE Attacks**: Disable external entity processing
+2. **XML Bombs**: Implement entity expansion limits
+3. **Sanitization**: Properly escape and validate all XML input/output
 
 ## Performance Considerations
 
@@ -745,6 +1212,22 @@ jobs:
 3. **Caching**: Use Durable Objects to cache frequent requests
 4. **Bundle Size**: Keep dependencies minimal
 5. **Memory Usage**: Be mindful of the 128MB limit per invocation
+6. **Request Limits**: Cloudflare Workers has the following limits to consider:
+   - CPU time: Maximum of 30ms on free plans, 50ms on Bundled plans, 30s on Unbound plans
+   - Memory: 128MB per invocation
+   - Requests: Rate limiting varies by plan (100k/day on free plans)
+   - Durable Objects: Storage limits and operation counts
+   - Subrequests: Limited to 50 per request on most plans
+
+### Optimization Strategies
+
+1. **Minimize External Calls**: Batch API requests when possible
+2. **Implement Strategic Caching**:
+   - Cache calendar data with appropriate TTL values
+   - Use ETag headers for validation
+3. **Use Web Optimized Formats**:
+   - Consider JSON alternatives to XML when possible
+   - Compress responses with appropriate encoding
 
 ## Troubleshooting
 
