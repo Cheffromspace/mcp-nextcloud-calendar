@@ -53,6 +53,31 @@ The target architecture will use:
 - Fetch API for HTTP requests
 - Durable Objects for state management
 - Cloudflare Secret Manager for configuration
+- Workers VPC for connecting to existing backend services (2025 feature)
+
+### Workers VPC Integration
+
+Cloudflare Workers VPC (released in 2025) allows Workers to connect directly to private networks and backend services. This significantly simplifies the architecture by:
+
+1. Enabling direct connections to existing Nextcloud instances without public exposure
+2. Supporting private network communication with other microservices
+3. Maintaining security through private networking rather than public APIs
+4. Reducing latency by avoiding public internet routing
+
+To configure Workers VPC:
+
+```toml
+# wrangler.toml
+[vpc]
+id = "your-vpc-id"
+routes = [
+  # Define networks that the Worker should be able to access
+  { network = "10.0.0.0/8" },
+  { hostname = "nextcloud.internal.example.com" }
+]
+```
+
+This configuration allows your Worker to securely connect to your Nextcloud server on the private network.
 
 ## Cloudflare Workers Setup
 
@@ -124,45 +149,93 @@ The target architecture will use:
 
 ### MCP Tools Conversion
 
-#### Express.js MCP Server Definition (Current)
+#### MCP Protocol March 2025 Specification Updates
+
+The latest MCP Protocol specification (March 2025) includes several important changes that we need to account for in our migration:
+
+1. **Streamable HTTP Transport**
+   - Unified endpoint for GET (SSE streams), POST (messages), and DELETE (session termination)
+   - Streaming message support with metadata for partial responses
+   - Better support for long-running operations
+
+2. **Session Context**
+   - Enhanced state management across multiple interactions
+   - Support for context objects that persist for the duration of a session
+   - Ability to reference previous results in subsequent tool calls
+
+3. **Progressive Tool Results**
+   - Support for tools that stream partial results as they become available
+   - Progress indicators for long-running operations
+   - Client-side rendering of incremental updates
+
+4. **Authentication Enhancements**
+   - OAuth 2.0 integration for secure delegated access
+   - Scope-based permission model for tool access
+   - Granular rate limiting and quota management
+
+To implement these features in our Cloudflare Worker, we'll need to:
 
 ```typescript
-// Current implementation
-const server = new McpServer({
-  name: serverConfig.serverName,
-  version: serverConfig.serverVersion,
-});
-
-server.tool('listCalendars', {}, async () => {
-  try {
-    const calendars = await calendarService.getCalendars();
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ success: true, calendars }, null, 2),
-        },
-      ],
-    };
-  } catch (error) {
-    return handleCalendarToolError('retrieve calendars', error);
-  }
-});
-```
-
-#### Cloudflare Workers MCP Conversion (Target)
-
-```typescript
-// Target implementation
+// Enhanced Worker implementation with March 2025 spec support
 export default class CalendarWorker extends WorkerEntrypoint<Env> {
+  // Session storage using Durable Objects
+  private sessions: DurableObjectNamespace;
+
+  constructor(env: Env) {
+    super();
+    this.sessions = env.SESSIONS;
+  }
+
+  // Tool implementation with progressive results support
   /**
-   * Lists all available calendars
+   * Lists all available calendars with streaming support
+   * @param progressCallback Optional callback for streaming progress updates
    * @return The calendars from Nextcloud
    */
-  async listCalendars() {
+  async listCalendars(
+    options?: { progressCallback?: ProgressCallback }
+  ) {
     try {
+      const sessionId = this.getSessionId();
+      const sessionStorage = await this.getSessionStorage(sessionId);
       const calendarService = new CalendarService(this.env);
-      const calendars = await calendarService.getCalendars();
+
+      // Send progressive updates if callback provided
+      if (options?.progressCallback) {
+        options.progressCallback({
+          status: "in_progress",
+          message: "Connecting to Nextcloud server...",
+          progress: 0.1
+        });
+      }
+
+      // Start retrieving calendars (potentially a longer operation)
+      const calendarsPromise = calendarService.getCalendars();
+
+      // Send intermediate progress while waiting
+      if (options?.progressCallback) {
+        options.progressCallback({
+          status: "in_progress",
+          message: "Retrieving calendar information...",
+          progress: 0.5
+        });
+      }
+
+      // Wait for results
+      const calendars = await calendarsPromise;
+
+      // Store in session context for future reference
+      await sessionStorage.put("calendars", calendars);
+
+      // Final completion
+      if (options?.progressCallback) {
+        options.progressCallback({
+          status: "complete",
+          message: "Calendars retrieved successfully",
+          progress: 1.0
+        });
+      }
+
       return {
         content: [
           {
@@ -170,19 +243,23 @@ export default class CalendarWorker extends WorkerEntrypoint<Env> {
             text: JSON.stringify({ success: true, calendars }, null, 2),
           },
         ],
+        context: {
+          // Store a reference ID that can be used in subsequent calls
+          calendarResultRef: `session:${sessionId}:calendars`
+        }
       };
     } catch (error) {
       return this.handleCalendarToolError('retrieve calendars', error);
     }
   }
-  
+
   /**
    * Handles errors for calendar operations
    */
   private handleCalendarToolError(operation: string, error: unknown) {
     console.error(`Error in ${operation} tool:`, error);
     const sanitizedMessage = this.sanitizeError(error).message;
-    
+
     return {
       isError: true,
       content: [
@@ -193,12 +270,58 @@ export default class CalendarWorker extends WorkerEntrypoint<Env> {
       ],
     };
   }
-  
+
   /**
-   * Entry point for the Worker
+   * Gets or creates session storage
+   */
+  private async getSessionStorage(sessionId: string) {
+    const id = this.sessions.idFromName(sessionId);
+    const sessionObj = this.sessions.get(id);
+    return sessionObj;
+  }
+
+  /**
+   * Entry point for the Worker supporting the streamable HTTP transport
    */
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Handle the unified MCP endpoint
+    if (url.pathname === "/mcp") {
+      // GET - establish SSE stream
+      if (request.method === "GET") {
+        return this.handleSseConnection(request);
+      }
+
+      // POST - handle message
+      if (request.method === "POST") {
+        return this.handleMessage(request);
+      }
+
+      // DELETE - terminate session
+      if (request.method === "DELETE") {
+        return this.handleSessionTermination(request);
+      }
+    }
+
+    // Default to standard MCP handling
     return new ProxyToSelf(this).fetch(request);
+  }
+
+  // Implement streamable HTTP transport handlers (March 2025 spec)
+  private async handleSseConnection(request: Request): Promise<Response> {
+    // Implementation for SSE stream handling...
+    // ...
+  }
+
+  private async handleMessage(request: Request): Promise<Response> {
+    // Implementation for message handling...
+    // ...
+  }
+
+  private async handleSessionTermination(request: Request): Promise<Response> {
+    // Implementation for session termination...
+    // ...
   }
 }
 ```
