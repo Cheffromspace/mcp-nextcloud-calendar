@@ -1,0 +1,39 @@
+# wrangler.toml
+name = "mcp-nextcloud-calendar"
+main = "src/index.ts"
+compatibility_date = "2025-02-22"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects configuration
+[durable_objects]
+bindings = [
+  { name = "SESSIONS", class_name = "SessionStore" },
+  { name = "CALENDARS", class_name = "CalendarCache" }
+]
+
+# Migrations setup for Durable Objects
+[[migrations]]
+tag = "v1"
+new_classes = ["SessionStore", "CalendarCache"]
+
+# Development environment configuration
+[env.dev]
+name = "mcp-nextcloud-calendar-dev"
+# No secrets defined here as they come from .dev.vars
+
+# Staging environment configuration
+[env.staging]
+name = "mcp-nextcloud-calendar-staging"
+
+# Production environment configuration
+[env.production]
+name = "mcp-nextcloud-calendar"
+
+# VPC configuration for direct connections to internal services
+# Uncomment and configure when needed (Workers VPC is a 2025 feature)
+# [vpc]
+# id = "your-vpc-id"
+# routes = [
+#   { network = "10.0.0.0/8" },
+#   { hostname = "nextcloud.internal.example.com" }
+# ]
