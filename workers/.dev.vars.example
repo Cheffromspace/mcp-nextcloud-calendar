@@ -1,0 +1,11 @@
+# Development environment variables
+# Copy this file to .dev.vars and add your own values
+
+# Nextcloud credentials
+NEXTCLOUD_BASE_URL=https://your-nextcloud-instance.example.com
+NEXTCLOUD_USERNAME=your-username
+NEXTCLOUD_APP_TOKEN=your-app-token
+
+# Server configuration
+ENVIRONMENT=development
+DEBUG_MODE=true

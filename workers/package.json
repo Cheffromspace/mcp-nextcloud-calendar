@@ -1,0 +1,45 @@
+{
+  "name": "mcp-nextcloud-calendar-workers",
+  "version": "1.0.0",
+  "description": "MCP server for Nextcloud Calendar integration using Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint './src/**/*.ts'",
+    "format": "prettier --write './src/**/*.ts'",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "nextcloud",
+    "calendar",
+    "mcp",
+    "cloudflare",
+    "workers"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "nanoid": "^5.0.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240312.0",
+    "@types/node": "^20.11.30",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "miniflare": "^3.20240320.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.4.0",
+    "wrangler": "^3.37.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
